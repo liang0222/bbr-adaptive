@@ -32,11 +32,14 @@ bash <(curl -Ls https://raw.githubusercontent.com/liang0222/bbr-adaptive/main/bb
 ---
 ## 手动安装（生产推荐）
 1️⃣ 下载脚本
+
 ```bash
 curl -L -o bbr.sh https://raw.githubusercontent.com/liang0222/bbr-adaptive/main/bbr-adaptive.sh
 2️⃣ 添加执行权限
+
 ```bash
 chmod +x bbr.sh
 3️⃣ 运行脚本
+
 ```bash
 bash bbr.sh
