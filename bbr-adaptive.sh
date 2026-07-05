@@ -5,13 +5,30 @@ echo " BBR Adaptive v3.5 Enterprise Stable"
 echo "=============================="
 
 # =========================
+# 0. root 权限检查
+# =========================
+if [ "$(id -u)" -ne 0 ]; then
+    echo "错误：需要 root 权限运行，请使用 sudo。" >&2
+    exit 1
+fi
+
+# =========================
 # 1. 依赖
 # =========================
 apt update -y
 apt install -y curl iputils-ping ca-certificates bc >/dev/null 2>&1
 
 # =========================
-# 2. CPU
+# 2. BBR 内核支持检测
+# =========================
+modprobe tcp_bbr 2>/dev/null
+if ! grep -qw bbr /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null; then
+    echo "警告：当前内核不支持 BBR，请升级内核后重试。" >&2
+    exit 1
+fi
+
+# =========================
+# 3. CPU
 # =========================
 CPU_CORE=$(nproc)
 
@@ -26,7 +43,7 @@ fi
 echo "CPU Level: $CPU_LEVEL"
 
 # =========================
-# 3. IPv4优先 / IPv6 fallback
+# 4. IPv4优先 / IPv6 fallback
 # =========================
 PING_TARGET=""
 
@@ -41,15 +58,17 @@ fi
 echo "Network: $PING_TARGET"
 
 # =========================
-# 4. TCP真实延迟（核心升级）
+# 5. TCP真实延迟（核心升级）
 # =========================
 tcp_ping() {
     local host=$1
+    local start end curl_ret
     start=$(date +%s%N)
     curl -s --connect-timeout 2 --max-time 2 "$host" >/dev/null 2>&1
+    curl_ret=$?
     end=$(date +%s%N)
 
-    if [ $? -eq 0 ]; then
+    if [ "$curl_ret" -eq 0 ]; then
         echo $(( (end - start) / 1000000 ))
     else
         echo 999
@@ -67,7 +86,7 @@ fi
 echo "TCP Latency: ${LATENCY}ms"
 
 # =========================
-# 5. 丢包检测（稳定版）
+# 6. 丢包检测（稳定版）
 # =========================
 if [ "$PING_TARGET" = "ipv4" ]; then
     LOSS=$(ping -c 5 -W 1 1.1.1.1 | grep -oP '\d+(?=% packet loss)' | head -1)
@@ -82,12 +101,14 @@ fi
 echo "Loss: ${LOSS}%"
 
 # =========================
-# 6. 带宽检测
+# 7. 带宽检测
 # =========================
 if [ "$PING_TARGET" = "ipv4" ]; then
-    SPEED=$(curl -4 -o /dev/null -s -w "%{speed_download}" https://speed.cloudflare.com/__down?bytes=20000000)
+    SPEED=$(curl -4 -o /dev/null -s -w "%{speed_download}" "https://speed.cloudflare.com/__down?bytes=20000000")
+elif [ "$PING_TARGET" = "ipv6" ]; then
+    SPEED=$(curl -6 -o /dev/null -s -w "%{speed_download}" "https://speed.cloudflare.com/__down?bytes=20000000")
 else
-    SPEED=$(curl -6 -o /dev/null -s -w "%{speed_download}" https://speed.cloudflare.com/__down?bytes=20000000)
+    SPEED=0
 fi
 
 SPEED_MBPS=$(echo "$SPEED * 8 / 1000000" | bc -l 2>/dev/null)
@@ -97,7 +118,7 @@ SPEED_INT=${SPEED_MBPS%.*}
 echo "Bandwidth: $SPEED_INT Mbps"
 
 # =========================
-# 7. 三档带宽
+# 8. 三档带宽
 # =========================
 if [ "$SPEED_INT" -lt 200 ]; then
     BANDWIDTH="low"
@@ -108,15 +129,22 @@ else
 fi
 
 # =========================
-# 8. jitter（抖动检测）
+# 9. jitter（抖动检测）
 # =========================
-JITTER=$(ping -c 5 1.1.1.1 | awk -F '/' 'END{print $4}')
+if [ "$PING_TARGET" = "ipv4" ]; then
+    JITTER=$(ping -c 5 1.1.1.1 | awk -F '/' 'END{print $4}')
+elif [ "$PING_TARGET" = "ipv6" ]; then
+    JITTER=$(ping -6 -c 5 2606:4700:4700::1111 | awk -F '/' 'END{print $4}')
+else
+    JITTER=0
+fi
+
 [ -z "$JITTER" ] && JITTER=0
 
 echo "Jitter: ${JITTER}ms"
 
 # =========================
-# 9. 健康评分 v2
+# 10. 健康评分 v2
 # =========================
 SCORE=100
 
@@ -131,10 +159,13 @@ if [ "$LOSS" -gt 1 ]; then SCORE=$((SCORE - 20)); fi
 # jitter
 if (( $(echo "$JITTER > 20" | bc -l) )); then SCORE=$((SCORE - 15)); fi
 
+# 评分下限
+[ "$SCORE" -lt 0 ] && SCORE=0
+
 echo "Score: $SCORE"
 
 # =========================
-# 10. 模式
+# 11. 模式
 # =========================
 if [ "$SCORE" -ge 80 ]; then
     MODE="aggressive"
@@ -147,7 +178,7 @@ fi
 echo "Mode: $MODE"
 
 # =========================
-# 11. sysctl（TCP+UDP）
+# 12. sysctl（TCP+UDP）
 # =========================
 cat > /etc/sysctl.d/99-bbr-v3.5.conf <<EOF
 net.core.default_qdisc = fq
@@ -177,7 +208,7 @@ net.ipv4.udp_wmem_min = 8192
 EOF
 
 # =========================
-# 12. 模式调优
+# 13. 模式调优
 # =========================
 if [ "$MODE" = "aggressive" ]; then
 
@@ -208,7 +239,13 @@ fi
 # =========================
 # APPLY
 # =========================
-sysctl --system >/dev/null 2>&1
+if ! sysctl --system; then
+    echo "警告：sysctl 应用过程中出现错误，请检查以上输出。" >&2
+fi
+
+# 验证 BBR 是否真正生效
+CUR_CC=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
+CUR_QDISC=$(sysctl -n net.core.default_qdisc 2>/dev/null)
 
 echo "=============================="
 echo " DONE"
@@ -219,4 +256,12 @@ echo " SCORE: $SCORE"
 echo " LATENCY: ${LATENCY}ms"
 echo " LOSS: ${LOSS}%"
 echo " JITTER: ${JITTER}ms"
+echo " CONGESTION: $CUR_CC"
+echo " QDISC: $CUR_QDISC"
 echo "=============================="
+
+if [ "$CUR_CC" = "bbr" ]; then
+    echo "✅ BBR 已成功启用。"
+else
+    echo "❌ BBR 未生效，当前算法：$CUR_CC" >&2
+fi
