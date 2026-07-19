@@ -62,6 +62,16 @@ bash <(curl -Ls https://raw.githubusercontent.com/liang0222/bbr-adaptive/main/bb
 curl -L -o bbr.sh https://raw.githubusercontent.com/liang0222/bbr-adaptive/main/bbr-adaptive.sh
 ```
 
+
+2下载脚本
+
+```bash
+curl -L -o bbr-clean-install.sh https://raw.githubusercontent.com/liang0222/bbr-adaptive/main/bbr-clean-install.sh && \
+chmod +x bbr-clean-install.sh && \
+bash bbr-clean-install.sh --uninstall || true && \
+bash bbr-clean-install.sh
+```
+
 2️⃣ 添加执行权限
 
 ```bash
